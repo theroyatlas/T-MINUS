@@ -1588,28 +1588,73 @@
 
   <script>
     /* ========== LOCAL STORAGE ========== */
-    const ls = {
-      get: (key) => { try { return localStorage.getItem(key); } catch { return null; } },
-      set: (key, val) => { try { localStorage.setItem(key, val); } catch {} }
-    };
+    let storageBlocked = false;
+    let storageErrorPending = false;
+    let storageUIReady = false;
 
-    function loadJSON(key, fallback) {
-      try { const v = ls.get(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+    function reportStorageError() {
+      storageErrorPending = true;
+      if (storageUIReady) showCopyToast(t('storageError'));
     }
 
-    let voteCounts = loadJSON('dp_votes', {});
-    let myVotes = loadJSON('dp_my_votes', {});
-    let mySuggestionVotes = loadJSON('dp_my_suggestion_votes', {});
+    const ls = {
+      get: (key) => {
+        try { return localStorage.getItem(key); }
+        catch { storageBlocked = true; reportStorageError(); return null; }
+      },
+      set: (key, val) => {
+        if (storageBlocked) { reportStorageError(); return false; }
+        try { localStorage.setItem(key, val); return true; }
+        catch { reportStorageError(); return false; }
+      }
+    };
+
+    function isVoteMap(value, flags = false) {
+      return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+        Object.entries(value).every(([id, count]) => /^[1-9]\d*$/.test(id) &&
+          Number.isSafeInteger(Number(id)) && (flags ? typeof count === 'boolean' :
+            Number.isSafeInteger(count) && count >= 0));
+    }
+
+    function loadJSON(key, fallback, validate) {
+      try {
+        const raw = ls.get(key);
+        if (raw === null) return fallback;
+        const value = JSON.parse(raw);
+        if (!validate(value)) throw new Error('Invalid stored data');
+        return value;
+      } catch {
+        // Keep the original bytes available for recovery; never seed over them.
+        storageBlocked = true;
+        reportStorageError();
+        return fallback;
+      }
+    }
+
+    const storedVotes = loadJSON('dp_vote_state', null, value => value !== null &&
+      typeof value === 'object' && value.version === 1 &&
+      isVoteMap(value.counts) && isVoteMap(value.mine, true));
+    let voteCounts = storedVotes ? storedVotes.counts : loadJSON('dp_votes', {}, isVoteMap);
+    let myVotes = storedVotes ? storedVotes.mine : loadJSON('dp_my_votes', {}, value => isVoteMap(value, true));
+    let mySuggestionVotes = loadJSON('dp_my_suggestion_votes', {}, value => value !== null &&
+      typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(flag => typeof flag === 'boolean'));
     let suggestionCache = [];
 
-    function saveVoteCounts(data) { ls.set('dp_votes', JSON.stringify(data)); }
-    function saveMyVotes(data) { ls.set('dp_my_votes', JSON.stringify(data)); }
-    function saveMySuggestionVotes(data) { ls.set('dp_my_suggestion_votes', JSON.stringify(data)); }
-    function loadUserEvents() { return loadJSON('dp_user_events', []); }
-    function saveUserEvents(list) { ls.set('dp_user_events', JSON.stringify(list)); }
+    function saveVoteState(counts, mine) {
+      // One setItem keeps the count and its personal-vote flag together. Legacy
+      // keys remain untouched, including if migration or a later write fails.
+      if (!ls.set('dp_vote_state', JSON.stringify({ version: 1, counts, mine }))) return false;
+      voteCounts = counts;
+      myVotes = mine;
+      return true;
+    }
+    function saveMySuggestionVotes(data) { return ls.set('dp_my_suggestion_votes', JSON.stringify(data)); }
+    function loadUserEvents() { return loadJSON('dp_user_events', [], Array.isArray); }
+    function saveUserEvents(list) { return ls.set('dp_user_events', JSON.stringify(list)); }
 
     const I18N = {
       'zh-TW': {
+        storageError: '⚠️ 無法讀取或儲存本機資料，變更未儲存；既有資料已保留。請檢查瀏覽器儲存設定後重新載入。',
         navSub: '與世界一起倒數',
         globalVotes: '全球投票',
         create: '+ 建立倒數',
@@ -1679,7 +1724,7 @@
         urgentNow: '倒數衝刺',
         scrollExplore: '探索更多',
         titleFormat: '{d}天{h}時{m}分 — {event} | T-MINUS',
-        shareText: '距離 {event} 還有 {days} 天！{emoji}\n🔥 {votes} 人已投票\n\n🚀 來 T-Minus 一起倒數\nhttps://roywg925.github.io/T-MINUS/\n#TMinus',
+        shareText: '距離 {event} 還有 {days} 天！{emoji}\n🔥 {votes} 人已投票\n\n🚀 來 T-Minus 一起倒數\nhttps://theroyatlas.github.io/T-MINUS/\n#TMinus',
         shareTitle: '距離 {event} 還有 {days} 天',
         greetings: {
           morning: ['晨光已上線，今天值得期待。', '早安，目標正在向你靠近。', '把今天過好，倒數會給你答案。'],
@@ -1689,6 +1734,7 @@
         }
       },
       en: {
+        storageError: '⚠️ Local data could not be read or saved. Changes were not saved; existing data was kept. Check browser storage settings and reload.',
         navSub: 'Count down with the world', globalVotes: 'global votes', create: '+ Create Countdown', explore: 'EXPLORE EVENTS',
         filters: { all: 'All', sports: '⚡ Sports', tech: '💡 Tech', entertainment: '🎬 Entertainment', holiday: '🎊 Holidays' },
         footerTagline: 'Every second brings us closer to what matters.', shortcutCreate: 'Create countdown', shortcutClose: 'Close modal', shortcutTop: 'Back to top',
@@ -1705,7 +1751,7 @@
         suggestDbOff: '⚠️ Database is not enabled yet, recommendation cannot be submitted.', suggestSent: '✅ Recommendation sent. Thank you!', suggestSupport: 'Support', suggestSupported: 'Supported', suggestVotes: '{count} supports', suggestPendingTag: 'Pending review', suggestNoData: 'No recommendations yet. Be the first to submit one.',
         emptyTitle: 'No countdowns in this category yet', emptySub: 'Try another category or create one now', urgentSoon: 'COMING SOON', urgentNow: 'HAPPENING SOON',
         scrollExplore: 'Explore more', titleFormat: '{d}d {h}h {m}m — {event} | T-MINUS',
-        shareText: '{days} days left until {event}! {emoji}\n🔥 {votes} votes already\n\n🚀 Join the countdown on T-Minus\nhttps://roywg925.github.io/T-MINUS/\n#TMinus',
+        shareText: '{days} days left until {event}! {emoji}\n🔥 {votes} votes already\n\n🚀 Join the countdown on T-Minus\nhttps://theroyatlas.github.io/T-MINUS/\n#TMinus',
         shareTitle: '{days} days left until {event}',
         greetings: { morning: ['Morning. Your milestone is getting closer.', 'Good morning. Momentum starts now.', 'A fresh day, one step closer.'], noon: ['Midday check: progress is alive.', 'You are closer than this morning.', 'Keep going, the countdown is moving.'], evening: ['Evening mode, still moving forward.', 'Good evening. Let today count.', 'The day fades, your goal does not.'], night: ['Quiet night, loud ambition.', 'Late hours, steady progress.', 'Even at night, your future is on schedule.'] }
       },
@@ -1722,7 +1768,7 @@
         offlineBanner: '⚠️ データベース未接続 — 投票と推薦はブラウザにのみ保存されます', offlineVote: 'オフラインモード：投票は他のユーザーに同期されません', onlineTag: 'リアルタイム同期', offlineTag: 'オフライン',
         emptyTitle: 'このカテゴリにはまだイベントがありません', emptySub: '別カテゴリを試すか、新しく作成してください', urgentSoon: 'まもなく', urgentNow: '直前',
         scrollExplore: 'もっと見る', titleFormat: '{event}まで {d}日 {h}時間 {m}分 | T-MINUS',
-        shareText: '{event}まであと{days}日！{emoji}\n🔥 すでに{votes}票\n\n🚀 T-Minusで一緒にカウントダウン\nhttps://roywg925.github.io/T-MINUS/\n#TMinus',
+        shareText: '{event}まであと{days}日！{emoji}\n🔥 すでに{votes}票\n\n🚀 T-Minusで一緒にカウントダウン\nhttps://theroyatlas.github.io/T-MINUS/\n#TMinus',
         shareTitle: '{event}まであと{days}日',
         greetings: { morning: ['おはよう。今日も一歩前進。', '新しい朝、目標に近づく時間。', '朝の一歩が未来を変える。'], noon: ['午後も進捗は止まらない。', 'ここからの積み上げが効く。', '今この時間も前進中。'], evening: ['こんばんは。今日を積み重ねよう。', '夜に向けても、目標は近づく。', '一日を終えてもカウントは続く。'], night: ['静かな夜、強い意志。', '夜更けでも進歩はある。', '遅い時間ほど、想いは深くなる。'] }
       },
@@ -1739,7 +1785,7 @@
         offlineBanner: '⚠️ Sin base de datos — los votos y recomendaciones solo se guardan localmente', offlineVote: 'Modo sin conexión: los votos no se sincronizan', onlineTag: 'Sincronización en vivo', offlineTag: 'Sin conexión',
         emptyTitle: 'Aún no hay eventos en esta categoría', emptySub: 'Prueba otra categoría o crea uno ahora', urgentSoon: 'PRONTO', urgentNow: 'MUY PRONTO',
         scrollExplore: 'Explorar más', titleFormat: '{d}d {h}h {m}m — {event} | T-MINUS',
-        shareText: '¡Faltan {days} días para {event}! {emoji}\n🔥 Ya hay {votes} votos\n\n🚀 Únete en T-Minus\nhttps://roywg925.github.io/T-MINUS/\n#TMinus',
+        shareText: '¡Faltan {days} días para {event}! {emoji}\n🔥 Ya hay {votes} votos\n\n🚀 Únete en T-Minus\nhttps://theroyatlas.github.io/T-MINUS/\n#TMinus',
         shareTitle: 'Faltan {days} días para {event}',
         greetings: { morning: ['Buenos días. Tu meta está más cerca.', 'Nueva mañana, nueva inercia.', 'Hoy también cuenta para llegar.'], noon: ['Seguimos avanzando este mediodía.', 'Más cerca que hace unas horas.', 'La cuenta regresiva no se detiene.'], evening: ['Buenas tardes. Cierra el día con progreso.', 'La tarde cae, tu meta se acerca.', 'Otro día bien invertido.'], night: ['Noche tranquila, objetivo firme.', 'Incluso de noche, sigues avanzando.', 'Tu futuro también se construye ahora.'] }
       },
@@ -1756,7 +1802,7 @@
         offlineBanner: '⚠️ Aucune base de donnees connectee — les votes sont enregistres localement', offlineVote: 'Mode hors ligne : les votes ne sont pas synchronises', onlineTag: 'Synchro en direct', offlineTag: 'Hors ligne',
         emptyTitle: 'Aucun evenement dans cette categorie', emptySub: 'Essayez une autre categorie ou creez-en un', urgentSoon: 'BIENTOT', urgentNow: 'IMMINENT',
         scrollExplore: 'Voir plus', titleFormat: '{d}j {h}h {m}m — {event} | T-MINUS',
-        shareText: 'Plus que {days} jours avant {event} ! {emoji}\n🔥 {votes} votes deja\n\n🚀 Rejoignez T-Minus\nhttps://roywg925.github.io/T-MINUS/\n#TMinus',
+        shareText: 'Plus que {days} jours avant {event} ! {emoji}\n🔥 {votes} votes deja\n\n🚀 Rejoignez T-Minus\nhttps://theroyatlas.github.io/T-MINUS/\n#TMinus',
         shareTitle: '{days} jours avant {event}',
         greetings: { morning: ['Bonjour. Votre objectif se rapproche.', 'Nouveau matin, nouvel elan.', 'Un pas de plus aujourd hui.'], noon: ['A midi, la progression continue.', 'Vous etes plus proche que ce matin.', 'La dynamique est la.'], evening: ['Bonsoir. Donnez du sens a cette journee.', 'Le soir tombe, votre cap avance.', 'Encore une journee utile.'], night: ['Nuit calme, ambition intacte.', 'Meme tard, vous avancez.', 'Le futur se construit aussi la nuit.'] }
       },
@@ -1773,7 +1819,7 @@
         offlineBanner: '⚠️ Keine Datenbank verbunden — Stimmen werden nur lokal gespeichert', offlineVote: 'Offlinemodus: Stimmen werden nicht synchronisiert', onlineTag: 'Live-Sync', offlineTag: 'Offline',
         emptyTitle: 'In dieser Kategorie gibt es noch keine Events', emptySub: 'Andere Kategorie waehlen oder jetzt erstellen', urgentSoon: 'BALD', urgentNow: 'SEHR BALD',
         scrollExplore: 'Mehr entdecken', titleFormat: '{d}T {h}h {m}m — {event} | T-MINUS',
-        shareText: '{days} Tage bis {event}! {emoji}\n🔥 Bereits {votes} Stimmen\n\n🚀 Mach mit bei T-Minus\nhttps://roywg925.github.io/T-MINUS/\n#TMinus',
+        shareText: '{days} Tage bis {event}! {emoji}\n🔥 Bereits {votes} Stimmen\n\n🚀 Mach mit bei T-Minus\nhttps://theroyatlas.github.io/T-MINUS/\n#TMinus',
         shareTitle: '{days} Tage bis {event}',
         greetings: { morning: ['Guten Morgen. Dein Ziel rueckt naeher.', 'Neuer Tag, neuer Schwung.', 'Heute zaehlt auf dem Weg zum Ziel.'], noon: ['Mittags laeuft der Fortschritt weiter.', 'Du bist naeher als heute Morgen.', 'Der Countdown arbeitet fuer dich.'], evening: ['Guten Abend. Lass den Tag wirken.', 'Der Abend kommt, dein Ziel auch.', 'Ein weiterer Schritt ist geschafft.'], night: ['Ruhige Nacht, klare Richtung.', 'Auch spaet geht es voran.', 'Deine Zukunft entsteht gerade jetzt.'] }
       }
@@ -1802,16 +1848,17 @@
 
     // 替所有缺少種子的事件補上（含首次造訪與新增事件的情況）
     function seedVotes() {
+      if (storageBlocked) return;
+      const counts = { ...voteCounts };
       let changed = false;
       events.forEach(e => {
-        if (voteCounts[e.id] === undefined) {
-          voteCounts[e.id] = Math.floor(Math.random() * 18) + 5;
+        if (counts[e.id] === undefined) {
+          counts[e.id] = Math.floor(Math.random() * 18) + 5;
           changed = true;
         }
       });
       if (changed) {
-        saveVoteCounts(voteCounts);
-        ls.set('dp_seeded', '1');
+        saveVoteState(counts, myVotes);
       }
     }
 
@@ -2469,8 +2516,8 @@
 
     /* ========== UTILITY ========== */
     function getCountdown(dateStr) {
-      const diff = new Date(dateStr).getTime() - Date.now();
-      if (diff <= 0) return { days: 0, hours: 0, minutes: 0, seconds: 0, expired: true, total: 0 };
+      const diff = (typeof dateStr === 'string' ? new Date(dateStr).getTime() : NaN) - Date.now();
+      if (!Number.isFinite(diff) || diff <= 0) return { days: 0, hours: 0, minutes: 0, seconds: 0, expired: true, total: 0 };
       return {
         days: Math.floor(diff / 86400000),
         hours: Math.floor((diff / 3600000) % 24),
@@ -2637,6 +2684,10 @@
       const allDigits = days + hrs + mins + secs;
 
       const digitEls = document.querySelectorAll('.hero-digit');
+      if (digitEls.length !== allDigits.length) {
+        document.getElementById('heroCountdown').innerHTML = buildHeroCountdown();
+        return;
+      }
       allDigits.split('').forEach((d, i) => {
         if (digitEls[i] && digitEls[i].textContent !== d) {
           digitEls[i].textContent = d;
@@ -2667,7 +2718,8 @@
     }
 
     function getTimeProgress(dateStr) {
-      const eventTime = new Date(dateStr).getTime();
+      const eventTime = typeof dateStr === 'string' ? new Date(dateStr).getTime() : NaN;
+      if (!Number.isFinite(eventTime)) return 0;
       const now = Date.now();
       const totalPeriod = 365 * 86400000;
       const remaining = eventTime - now;
@@ -2777,6 +2829,11 @@
         const daysStr = String(cd.days).padStart(cd.days > 99 ? 3 : 2, '0');
         const allDigits = daysStr + pad(cd.hours) + pad(cd.minutes) + pad(cd.seconds);
         const digitEls = document.querySelectorAll(`.card-digit[data-event="${event.id}"]`);
+        if (digitEls.length !== allDigits.length) {
+          const countdown = document.getElementById(`card-cd-${event.id}`);
+          if (countdown) countdown.innerHTML = buildCardCountdown(event);
+          return;
+        }
         allDigits.split('').forEach((d, i) => {
           if (digitEls[i] && digitEls[i].textContent !== d) {
             digitEls[i].textContent = d;
@@ -2821,7 +2878,7 @@
       const text = t('shareText', { event: event.name, days: cd.days, emoji: event.emoji, votes });
 
       if (navigator.share) {
-        navigator.share({ title: t('shareTitle', { event: event.name, days: cd.days }), text, url: 'https://roywg925.github.io/T-MINUS/' }).catch(() => {});
+        navigator.share({ title: t('shareTitle', { event: event.name, days: cd.days }), text, url: 'https://theroyatlas.github.io/T-MINUS/' }).catch(() => {});
       } else if (navigator.clipboard) {
         navigator.clipboard.writeText(text).then(() => {
           showCopyToast();
@@ -2864,13 +2921,12 @@
 
     function voteHype(btn, id) {
       if (window.event) window.event.stopPropagation();
+      if (!Number.isSafeInteger(id) || !events.some(e => e.id === id)) return;
       if (hasVoted(id) || btn.classList.contains('voted')) return;
+      if (getVoteCount(id) >= Number.MAX_SAFE_INTEGER) { reportStorageError(); return; }
 
       // 儲存投票
-      myVotes[id] = true;
-      saveMyVotes(myVotes);
-      voteCounts[id] = (voteCounts[id] || 0) + 1;
-      saveVoteCounts(voteCounts);
+      if (!saveVoteState({ ...voteCounts, [id]: getVoteCount(id) + 1 }, { ...myVotes, [id]: true })) return;
 
       // 視覺回饋
       btn.classList.add('voted');
@@ -3064,6 +3120,8 @@
     applyLanguage(currentLang);
     updateGlobalCounter();
     requestAnimationFrame(animate);
+    storageUIReady = true;
+    if (storageErrorPending) reportStorageError();
 
     // Tick every second
     setInterval(() => {
